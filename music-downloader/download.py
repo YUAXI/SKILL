@@ -63,8 +63,10 @@ except NameError:  # pragma: no cover - 非交互环境
 QUALITY_CHAIN = [999, 740, 320, 192, 128]
 QUALITY_LABEL = {999: "24bit无损", 740: "16bit无损", 320: "320K", 192: "192K", 128: "128K"}
 SOURCE_ORDER = [
-    "netease", "tencent", "kuwo", "tidal", "qobuz",
-    "joox", "bilibili", "apple", "ytmusic", "spotify",
+    # 2026-09-19 实测：API 只接受 netease / kuwo / joox（bilibili 返回空但不报错），
+    # tencent / tidal / qobuz / spotify / apple / ytmusic / migu / kugou / baidu
+    # 一律返回 400 "Value of `source` is not supported"。
+    "netease", "kuwo", "joox", "bilibili",
 ]
 SUPPORTED_SOURCES = list(SOURCE_ORDER)
 RATE_LIMIT_MAX = 50
