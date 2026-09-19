@@ -11,12 +11,18 @@ GD音乐台 音乐搜索 / 下载器
   * pic    : types=pic&source=..&id=..&size=300/500 (pic_id)
 
 音质降级策略：999(24bit无损) -> 740(16bit无损) -> 320 -> 192 -> 128
+跨源回退：netease -> tencent -> kuwo -> tidal -> qobuz -> joox -> bilibili -> apple -> ytmusic -> spotify
+
+首次使用会询问下载目录与音质偏好，并记入 .music-downloader.json。
 
 用法示例：
   python download.py "练习"                        # 搜索并交互选择后下载
   python download.py "周杰伦 晴天" --select 1       # 直接下载第 1 条
   python download.py "Hello" --search-only --json   # 仅搜索，输出 JSON
+  python download.py --set-dir "D:\\Music"         # 设置默认下载目录
+  python download.py --set-quality 320             # 设置默认音质
   python download.py "Hello" --source joox --no-lyric
+  python download.py "冷门歌" --no-fallback         # 只在指定源尝试
 
 仅供个人学习交流使用，请勿用于商业用途。音乐版权归各音乐平台所有。
 """
@@ -43,7 +49,6 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
-
 API_BASE = "https://music-api.gdstudio.xyz/api.php"
 DEFAULT_SOURCE = "netease"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,18 +59,26 @@ try:
 except NameError:  # pragma: no cover - 非交互环境
     def _INPUT(prompt=""):
         raise EOFError("no stdin")
+
 QUALITY_CHAIN = [999, 740, 320, 192, 128]
 QUALITY_LABEL = {999: "24bit无损", 740: "16bit无损", 320: "320K", 192: "192K", 128: "128K"}
-SUPPORTED_SOURCES = [
-    "netease", "joox", "bilibili", "tencent", "kuwo",
-    "tidal", "qobuz", "apple", "ytmusic", "spotify",
+SOURCE_ORDER = [
+    "netease", "tencent", "kuwo", "tidal", "qobuz",
+    "joox", "bilibili", "apple", "ytmusic", "spotify",
 ]
+SUPPORTED_SOURCES = list(SOURCE_ORDER)
 RATE_LIMIT_MAX = 50
 RATE_LIMIT_WINDOW = 300  # 秒
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+
+def order_sources(preferred, all_sources=SOURCE_ORDER):
+    """把 preferred 提到最前，其余按默认顺序跟随，得到尝试顺序。"""
+    rest = [s for s in all_sources if s != preferred]
+    return [preferred] + rest
 
 
 class MusicAPIError(Exception):
@@ -196,7 +209,27 @@ class MusicClient:
 
 
 # ---------- 工具函数 ----------
-# ---------- 配置（下载位置记忆） ----------
+def artists_to_str(artist):
+    if isinstance(artist, (list, tuple)):
+        return ", ".join(str(a).strip() for a in artist if str(a).strip()) or "未知歌手"
+    if artist is None:
+        return "未知歌手"
+    return str(artist).strip() or "未知歌手"
+
+
+def name_matches(query, item):
+    """粗略判断搜索结果是否与关键字相关（用于跨源回退时筛选）。"""
+    name = str(item.get("name") or "")
+    artist = artists_to_str(item.get("artist"))
+    album = str(item.get("album") or "")
+    haystack = ("%s %s %s" % (name, artist, album)).lower()
+    tokens = [t for t in re.split(r"\s+", str(query).lower().strip()) if t]
+    if not tokens:
+        return True
+    return any(t in haystack for t in tokens)
+
+
+# ---------- 配置（下载位置 / 音质记忆） ----------
 def load_config():
     if not os.path.exists(CONFIG_PATH):
         return {}
@@ -256,18 +289,68 @@ def resolve_output_dir(args):
     return chosen
 
 
+def parse_quality(raw, default=999):
+    """把用户输入的画质选项解析为 br 值。接受序号或直接数值。"""
+    raw = str(raw).strip().lower()
+    if raw in ("", "d", "default"):
+        return default
+    menu = {"1": 999, "2": 320, "3": 128, "999": 999, "320": 320, "128": 128}
+    if raw in menu:
+        return menu[raw]
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value in QUALITY_CHAIN else default
+
+
+def resolve_quality(args):
+    """决定首选音质：--br > 已保存的配置 > 询问用户。
+
+    首次使用（未显式指定 --br 且无配置）时询问音质偏好，并记住答案；
+    下载失败时会自动降级。
+    """
+    config = load_config()
+    if args.br_explicit:
+        config["quality"] = args.br
+        save_config(config)
+        return args.br
+
+    saved = config.get("quality")
+    if saved in QUALITY_CHAIN:
+        return saved
+
+    if not is_interactive():
+        return args.br
+
+    print("\n首次使用，请选择音频音质（直接回车默认 1）。")
+    print("  1. 24bit 无损 999（默认，失败自动降级）")
+    print("  2. 320K")
+    print("  3. 128K")
+    try:
+        raw = _INPUT("请选择 [1]：")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return args.br
+    quality = parse_quality(raw, default=args.br)
+    config["quality"] = quality
+    save_config(config)
+    print("已记住音质偏好：%s (%s)（下次将不再询问）\n"
+          % (quality, QUALITY_LABEL.get(quality, quality)))
+    return quality
+
+
+def resolve_output_dir_and_quality(args):
+    """首次运行时一次性询问下载目录与音质，均写入配置。"""
+    output_dir = resolve_output_dir(args)
+    quality = resolve_quality(args)
+    return output_dir, quality
+
+
 def sanitize_filename(name):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(name))
     name = re.sub(r"\s+", " ", name).strip(" .")
     return name[:120] or "unknown"
-
-
-def artists_to_str(artist):
-    if isinstance(artist, (list, tuple)):
-        return ", ".join(str(a).strip() for a in artist if str(a).strip()) or "未知歌手"
-    if artist is None:
-        return "未知歌手"
-    return str(artist).strip() or "未知歌手"
 
 
 def guess_extension(url, br):
@@ -404,6 +487,88 @@ def save_cover(client, item, source, base_path):
     return cover_path
 
 
+def try_download_item(client, item, source, quality, output_dir,
+                      want_lyric=True, want_translation=True, want_cover=False):
+    """尝试下载给定搜索结果；成功返回音频路径，失败返回 None。
+
+    会按音质链尝试获取直链并下载。歌词/封面在该源下载成功后附带保存。
+    """
+    name = item.get("name") or "未知曲目"
+    artist = artists_to_str(item.get("artist"))
+    track_id = item.get("id")
+    if not track_id:
+        print("[跳过] 结果缺少曲目 ID。")
+        return None
+
+    chain = [quality] + [b for b in QUALITY_CHAIN if b != quality]
+    try:
+        url, actual_br, size_bytes = client.resolve_audio(track_id, source=source, chain=chain)
+    except MusicAPIError as exc:
+        print("[%s] 获取下载链接失败：%s" % (source, exc))
+        return None
+    label = QUALITY_LABEL.get(actual_br, str(actual_br))
+    print("[%s] 已获取链接：音质 %s (%s)，大小约 %s"
+          % (source, actual_br, label, format_size(size_bytes) if size_bytes else "未知"))
+
+    ext = guess_extension(url, actual_br)
+    stem = sanitize_filename("%s - %s" % (artist, name))
+    audio_path = unique_path(output_dir, stem, ext)
+    try:
+        size = download_file(url, audio_path, expected_size_bytes=size_bytes)
+    except Exception as exc:  # noqa: BLE001
+        print("[%s] 下载失败：%s" % (source, exc))
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+        except OSError:
+            pass
+        return None
+    print("[%s] 音频已保存：%s (%s)" % (source, audio_path, format_size(size)))
+
+    base_path = os.path.splitext(audio_path)[0]
+    if want_lyric:
+        save_lyric(client, item, source, base_path, want_translation=want_translation)
+    if want_cover:
+        save_cover(client, item, source, base_path)
+    return audio_path
+
+
+def pick_candidate(results, query):
+    """从搜索结果中挑一条与关键字最相关的曲目（优先精确匹配歌名）。"""
+    if not results:
+        return None
+    query_l = str(query).lower().strip()
+    for item in results:
+        if str(item.get("name") or "").lower().strip() == query_l:
+            return item
+    for item in results:
+        if name_matches(query, item):
+            return item
+    return results[0]
+
+
+def search_with_fallback(client, keyword, preferred_source, count, pages,
+                         fallback=True, source_order=SOURCE_ORDER):
+    """搜索：优先源失败/无结果时依次尝试其他源。
+
+    返回 (results, actual_source)；全部失败返回 ([], None)。
+    """
+    sources = order_sources(preferred_source, source_order) if fallback else [preferred_source]
+    for idx, source in enumerate(sources):
+        if idx > 0:
+            print("  [回退] 尝试音乐源：%s ..." % source)
+        print("正在 [%s] 源搜索：%s ..." % (source, keyword))
+        try:
+            results = client.search(keyword, source=source, count=count, pages=pages)
+        except MusicAPIError as exc:
+            print("  [%s] 搜索失败：%s" % (source, exc))
+            results = []
+        if results:
+            return results, source
+        print("  [%s] 未搜索到结果。" % source)
+    return [], None
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="GD音乐台 音乐搜索与下载器",
@@ -423,6 +588,10 @@ def build_parser():
                         help="下载目录，覆盖并记住该位置；首次使用未指定时会询问")
     parser.add_argument("--set-dir", default=None,
                         help="仅设置并保存默认下载目录，然后退出")
+    parser.add_argument("--set-quality", type=int, default=None,
+                        help="仅设置并保存默认音质（999/740/320/192/128），然后退出")
+    parser.add_argument("--no-fallback", action="store_true",
+                        help="搜索/下载失败时不尝试其他音乐源，仅用 --source")
     parser.add_argument("--search-only", action="store_true", help="仅搜索并展示结果，不下载")
     parser.add_argument("--json", action="store_true", help="配合 --search-only，以 JSON 输出结果")
     parser.add_argument("--first", action="store_true", help="多条结果时自动选择第 1 条，不交互")
@@ -435,6 +604,7 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.br_explicit = any(a == "--br" or a.startswith("--br=") for a in (argv if argv is not None else sys.argv[1:]))
 
     if args.set_dir:
         chosen = os.path.abspath(os.path.expanduser(args.set_dir))
@@ -442,6 +612,18 @@ def main(argv=None):
         config["download_dir"] = chosen
         if save_config(config):
             print("已设置默认下载目录：%s" % chosen)
+            return 0
+        return 1
+
+    if args.set_quality is not None:
+        if args.set_quality not in QUALITY_CHAIN:
+            print("错误：音质必须是 %s 之一。" % "/".join(str(b) for b in QUALITY_CHAIN))
+            return 2
+        config = load_config()
+        config["quality"] = args.set_quality
+        if save_config(config):
+            print("已设置默认音质：%s (%s)"
+                  % (args.set_quality, QUALITY_LABEL.get(args.set_quality, args.set_quality)))
             return 0
         return 1
 
@@ -453,27 +635,29 @@ def main(argv=None):
         print("[警告] 未知音乐源 %s，仍将尝试请求。" % args.source)
 
     client = MusicClient()
+    fallback = not args.no_fallback
 
-    # 1. 搜索
-    print("正在 [%s] 源搜索：%s ..." % (args.source, args.keyword))
-    try:
-        results = client.search(args.keyword, source=args.source,
-                                count=args.count, pages=args.pages)
-    except MusicAPIError as exc:
-        print("搜索失败：%s" % exc)
-        return 1
+    # 0. 首次使用：询问下载目录与音质偏好（非 search-only 时）
+    if args.search_only:
+        quality = args.br
+    else:
+        _, quality = resolve_output_dir_and_quality(args)
+
+    # 1. 搜索（带跨源回退）
+    results, actual_source = search_with_fallback(
+        client, args.keyword, args.source, args.count, args.pages, fallback=fallback)
     if not results:
-        print("未搜索到任何结果。")
+        print("所有音乐源均未搜索到结果。")
         return 1
 
     if args.search_only:
         if args.json:
             print(json.dumps(results, ensure_ascii=False, indent=2))
         else:
-            print_results(results, args.source)
+            print_results(results, actual_source)
         return 0
 
-    print_results(results, args.source)
+    print_results(results, actual_source)
 
     # 2. 选择曲目
     if args.select is not None or args.first or len(results) == 1:
@@ -485,43 +669,54 @@ def main(argv=None):
     name = item.get("name") or "未知曲目"
     artist = artists_to_str(item.get("artist"))
     album = item.get("album") or "未知专辑"
-    track_id = item.get("id")
-    if not track_id:
+    if not item.get("id"):
         print("错误：该结果缺少曲目 ID，无法下载。")
         return 1
-    print("\n已选择：%s - %s 《%s》 (id=%s)" % (name, artist, album, track_id))
+    print("\n已选择：%s - %s 《%s》 (id=%s)"
+          % (name, artist, album, item.get("id")))
 
-    # 3. 解析音质链
-    chain = [args.br] + [b for b in QUALITY_CHAIN if b != args.br]
-    print("正在获取下载链接（音质优先级：%s）..." % " -> ".join(str(b) for b in chain))
-    try:
-        url, actual_br, size_bytes = client.resolve_audio(track_id, source=args.source, chain=chain)
-    except MusicAPIError as exc:
-        print("获取下载链接失败：%s" % exc)
-        return 1
-    label = QUALITY_LABEL.get(actual_br, str(actual_br))
-    print("已获取链接：音质 %s (%s)，大小约 %s"
-          % (actual_br, label, format_size(size_bytes) if size_bytes else "未知"))
-
-    # 4. 下载音频
     output_dir = resolve_output_dir(args)
     os.makedirs(output_dir, exist_ok=True)
-    ext = guess_extension(url, actual_br)
-    stem = sanitize_filename("%s - %s" % (artist, name))
-    audio_path = unique_path(output_dir, stem, ext)
-    try:
-        size = download_file(url, audio_path, expected_size_bytes=size_bytes)
-    except Exception as exc:  # noqa: BLE001
-        print("下载失败：%s" % exc)
-        return 1
-    print("音频已保存：%s (%s)" % (audio_path, format_size(size)))
 
-    base_path = os.path.splitext(audio_path)[0]
-    if not args.no_lyric:
-        save_lyric(client, item, args.source, base_path,
-                   want_translation=not args.no_translation)
-    if args.cover:
-        save_cover(client, item, args.source, base_path)
+    print("音质优先级：%s -> %s" % (quality, " -> ".join(
+        str(b) for b in QUALITY_CHAIN if b != quality)))
+
+    # 3. 下载：先在当前源尝试，失败则用同一关键词在其他源重新搜索并下载
+    sources = order_sources(actual_source, SOURCE_ORDER) if fallback else [actual_source]
+    audio_path = None
+    for idx, source in enumerate(sources):
+        if idx > 0:
+            print("\n[回退] 在 [%s] 源重新搜索并下载 ..." % source)
+            try:
+                alt_results = client.search(args.keyword, source=source,
+                                            count=args.count, pages=args.pages)
+            except MusicAPIError as exc:
+                print("  [%s] 搜索失败：%s" % (source, exc))
+                continue
+            if not alt_results:
+                print("  [%s] 未搜索到结果。" % source)
+                continue
+            alt = pick_candidate(alt_results, name if args.first else args.keyword)
+            if not alt or not alt.get("id"):
+                continue
+            print("  [%s] 找到：%s - %s 《%s》"
+                  % (source, alt.get("name"), artists_to_str(alt.get("artist")),
+                     alt.get("album") or "未知专辑"))
+            item, actual_source = alt, source
+        audio_path = try_download_item(
+            client, item, source, quality, output_dir,
+            want_lyric=not args.no_lyric,
+            want_translation=not args.no_translation,
+            want_cover=args.cover,
+        )
+        if audio_path:
+            break
+        if fallback:
+            print("  [%s] 下载未成功，继续尝试下一音乐源。" % source)
+
+    if not audio_path:
+        print("\n所有音乐源均下载失败。")
+        return 1
 
     print("\n完成！文件位于：%s" % output_dir)
     return 0

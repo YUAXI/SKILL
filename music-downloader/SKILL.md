@@ -10,7 +10,9 @@ description: 使用 GD音乐台 API 搜索并下载音乐、歌词与专辑封�
 - **接口 Base URL**：`https://music-api.gdstudio.xyz/api.php`
 - **请求方式**：全部为 `GET`
 - **频率限制**：5 分钟内最多 50 次请求（脚本内置滑动窗口限流，自动等待）
-- **默认音乐源**：`netease`；稳定源还有 `joox`、`bilibili`
+- **默认音乐源**：`netease`
+- **跨源回退顺序**：`netease → tencent → kuwo → tidal → qobuz → joox → bilibili → apple → ytmusic → spotify`
+- **音质**：默认 `999`（24bit 无损），失败自动降级 `740 → 320 → 192 → 128`
 
 > 免责声明：本 Skill 仅供个人学习交流使用，请勿用于商业用途。音乐版权归各音乐平台所有。
 
@@ -36,14 +38,16 @@ pip install -r requirements.txt   # 仅需 requests
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | `keyword` | String | 是 | - | 搜索关键字：歌曲名 / 歌手 / 专辑 |
-| `--source` | String | 否 | `netease` | 音乐源：`netease`、`joox`、`bilibili`、`tencent`、`kuwo`、`tidal`、`qobuz`、`apple`、`ytmusic`、`spotify` |
+| `--source` | String | 否 | `netease` | 首选音乐源；搜索/下载失败时按回退顺序自动尝试其它源 |
 | `--select` | Int | 否 | - | 直接选择第 N 条搜索结果（1 开始），用于非交互场景 |
 | `--first` | Flag | 否 | - | 多条结果时自动选第 1 条，不交互 |
 | `--count` | Int | 否 | `20` | 单页返回条数 |
 | `--pages` | Int | 否 | `1` | 页码 |
-| `--br` | Int | 否 | `999` | 首选音质，失败自动降级 `740 -> 320 -> 192 -> 128` |
+| `--br` | Int | 否 | 配置值/`999` | 首选音质，失败自动降级 `740 -> 320 -> 192 -> 128`；显式传入会记住 |
 | `--output` | String | 否 | 首次询问 | 下载目录；指定后会保存为默认位置 |
 | `--set-dir` | String | 否 | - | 仅设置并保存默认下载目录后退出 |
+| `--set-quality` | Int | 否 | - | 仅设置并保存默认音质（`999/740/320/192/128`）后退出 |
+| `--no-fallback` | Flag | 否 | - | 关闭跨源回退，只用 `--source` 指定的源 |
 | `--search-only` | Flag | 否 | - | 仅搜索并展示结果，不下载 |
 | `--json` | Flag | 否 | - | 配合 `--search-only`，以 JSON 输出结果 |
 | `--no-lyric` | Flag | 否 | - | 不下载歌词（默认会下载 `.lrc`） |
@@ -58,25 +62,41 @@ pip install -r requirements.txt   # 仅需 requests
 - 控制台：搜索结果列表、实际音质、下载进度与最终文件路径
 - `--search-only --json`：标准 JSON 数组，字段为接口原始返回（`id/name/artist/album/pic_id/lyric_id/source`）
 
-## 首次使用：下载位置
+## 首次使用：询问下载位置与音质
 
-**第一次使用本 Skill 时，必须先询问用户想把音乐保存到哪里**，不要自行替用户决定。行为约定：
+**第一次使用本 Skill 时，必须先询问用户「音乐保存到哪里」和「音质偏好」**，不要自行替用户决定。行为约定：
 
-- 首次（本地无配置且未传 `--output`）会**交互式询问**下载目录，直接回车则使用默认的 `music-downloader/downloads/`；答案会记入 `music-downloader/.music-downloader.json`，之后不再询问。
-- 若用户已明确给出目录，用 `--output <目录>` 一次性指定，同时会记住该目录。
-- 也可以先单独设置：`python download.py --set-dir "D:\Music"`。
-- Agent 代跑时若不希望交互：先问用户目录，再用 `--output` 传入；或用户想用默认目录时加 `--first` 并省略 `--output`（非交互环境会自动落到默认目录，不阻塞）。
+- 首次（本地无配置且未显式传参）会**依次交互式询问**：
+  1. 下载目录（回车默认 `music-downloader/downloads/`）；
+  2. 音质偏好：`1. 24bit 无损 999（默认）/ 2. 320K / 3. 128K`。
+- 两个答案都会记入 `music-downloader/.music-downloader.json`，之后不再询问。
+- Agent 代跑且不希望交互时，先问用户，再用 `--set-dir`、`--set-quality` 写入，或单次用 `--output` / `--br`。
+- 非交互环境（管道 / 无 stdin）不会阻塞，自动使用默认目录与默认音质。
 - 配置文件 `.music-downloader.json` 已被 `.gitignore` 忽略，属于本机个人设置，不要提交。
+
+## 跨音乐源回退
+
+一个源可能搜不到或下载失败，脚本会**自动尝试其他音乐源**，顺序固定为：
+
+```text
+netease → tencent → kuwo → tidal → qobuz → joox → bilibili → apple → ytmusic → spotify
+```
+
+- 搜索阶段：当前源无结果/报错，自动换下一个源。
+- 下载阶段：链接获取或下载失败（如无版权、直链 404），用同一关键字在下一个源重新搜索并下载。
+- 加 `--no-fallback` 可关闭回退，只用 `--source` 指定的源。
+- 回退时会打印 `[回退] 尝试音乐源：xxx`，最终保存的文件仍按 `歌手 - 歌名` 命名。
 
 ## 标准工作流
 
-**第 0 步 · 首次使用先问下载位置**（仅第一次）：询问用户音乐保存到哪里，拿到目录后：
+**第 0 步 · 首次使用先问下载位置与音质**（仅第一次）：询问用户音乐保存到哪里、想要什么音质，然后：
 
 ```bash
 python music-downloader/download.py --set-dir "<用户目录>"
+python music-downloader/download.py --set-quality 999
 ```
 
-之后所有下载都会自动使用该目录，无需重复询问。用户想用默认目录时，直接回车/跳过即可。
+之后所有下载都会自动使用这些设置，无需重复询问。用户想用默认值时直接回车/跳过即可。
 
 **第 1 步 · 搜索**（当用户未指定具体某一条时，先列出结果让用户选择）：
 
@@ -101,10 +121,11 @@ python music-downloader/download.py "<关键字>" --first
 ## 常用命令示例
 
 ```bash
-# 首次设置下载位置（只需一次，之后自动记住）
+# 首次设置下载位置与音质（只需一次，之后自动记住）
 python download.py --set-dir "D:\Music"
+python download.py --set-quality 999
 
-# 交互式搜索并选择下载
+# 交互式搜索并选择下载（首次会询问目录与音质）
 python download.py "练习"
 
 # 指定歌手 + 歌名，直接下第 1 条
@@ -113,11 +134,14 @@ python download.py "周杰伦 晴天" --first
 # 使用 joox 源、不下载歌词
 python download.py "Hello Adele" --source joox --no-lyric
 
+# 关闭跨源回退，只用 netease
+python download.py "冷门歌曲" --source netease --no-fallback --first
+
 # 仅搜索并输出 JSON（供程序解析）
 python download.py "海屿你" --search-only --json
 
-# 下载到指定目录并保存封面（同时记住该目录）
-python download.py "稻香" --output D:\Music --cover
+# 下载到指定目录、指定音质并保存封面（同时记住）
+python download.py "稻香" --output D:\Music --br 320 --cover
 ```
 
 ## 接口映射（API 速查）
@@ -138,9 +162,10 @@ python download.py "稻香" --output D:\Music --cover
 
 - **限流**：脚本用滑动窗口追踪请求时间戳，5 分钟满 50 次会自动休眠至窗口释放。
 - **重试**：网络错误 / 5xx 默认重试 3 次，指数退避；`429` 单独识别。
-- **音质降级**：从 `--br` 指定值开始，依次尝试 `740 → 320 → 192 → 128`，返回空 `url` 视为无该音质。
+- **音质降级**：从首选音质开始，依次尝试 `740 → 320 → 192 → 128`，返回空 `url` 视为无该音质。
+- **跨源回退**：搜索无结果或下载失败时，按固定顺序切换下一个音乐源重试（可用 `--no-fallback` 关闭）。
 - **文件名**：自动过滤 `\ / : * ? " < > |` 等非法字符，重名时追加 `(1)`、`(2)` 序号。
-- 若搜索无结果，可提示用户更换关键字或切换音乐源（推荐 `netease`、`joox`、`bilibili`）。
+- 若所有源都失败，提示用户更换关键字；`netease`、`joox`、`bilibili` 通常最稳。
 
 ## 安装为 opencode Skill（可选）
 

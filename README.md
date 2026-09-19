@@ -54,10 +54,14 @@ Search and download music, LRC lyrics and cover art via the GD音乐台 API.
 - **Runtime**: Python 3.8+, only dependency is `requests`.
 - **Install**: copy `music-downloader/` to a skill path, `pip install requests`,
   restart opencode.
-- **First run**: ask the user where to save music, then
-  `python download.py --set-dir "<folder>"` (remembered afterwards).
+- **First run**: ask the user for both the save folder and audio quality, then
+  `python download.py --set-dir "<folder>"` and `--set-quality <999|740|320|192|128>`
+  (remembered afterwards).
 - **Typical call**: `python download.py "<keyword>" --search-only` to list
   results, then `python download.py "<keyword>" --select <n>` to download.
+- **Cross-source fallback**: if a source finds nothing or the download fails, it
+  automatically retries in order `netease → tencent → kuwo → tidal → qobuz →
+  joox → bilibili → apple → ytmusic → spotify` (disable with `--no-fallback`).
 - **Output**: `歌手 - 歌名.flac` / `.mp3`, plus `.lrc` (and optional `.jpg`) in the
   chosen folder. Prefers lossless (`999`), degrades `740 -> 320 -> 192 -> 128`;
   rate-limited to 50 requests / 5 min.
