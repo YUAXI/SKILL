@@ -1,0 +1,4 @@
+API.md
+__pycache__/
+*.pyc
+downloads/
