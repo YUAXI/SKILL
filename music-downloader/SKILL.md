@@ -42,7 +42,8 @@ pip install -r requirements.txt   # 仅需 requests
 | `--count` | Int | 否 | `20` | 单页返回条数 |
 | `--pages` | Int | 否 | `1` | 页码 |
 | `--br` | Int | 否 | `999` | 首选音质，失败自动降级 `740 -> 320 -> 192 -> 128` |
-| `--output` | String | 否 | `./downloads/` | 下载目录 |
+| `--output` | String | 否 | 首次询问 | 下载目录；指定后会保存为默认位置 |
+| `--set-dir` | String | 否 | - | 仅设置并保存默认下载目录后退出 |
 | `--search-only` | Flag | 否 | - | 仅搜索并展示结果，不下载 |
 | `--json` | Flag | 否 | - | 配合 `--search-only`，以 JSON 输出结果 |
 | `--no-lyric` | Flag | 否 | - | 不下载歌词（默认会下载 `.lrc`） |
@@ -51,13 +52,31 @@ pip install -r requirements.txt   # 仅需 requests
 
 ## 出参（Outputs）
 
-- 音频文件：`./downloads/歌手 - 歌名.flac`（无损）或 `歌手 - 歌名.mp3`
-- 歌词文件（默认）：`./downloads/歌手 - 歌名.lrc`，有翻译时附加 `.trans.lrc`
-- 封面文件（可选）：`./downloads/歌手 - 歌名.jpg`
+- 音频文件：`<下载目录>/歌手 - 歌名.flac`（无损）或 `歌手 - 歌名.mp3`
+- 歌词文件（默认）：`<下载目录>/歌手 - 歌名.lrc`，有翻译时附加 `.trans.lrc`
+- 封面文件（可选）：`<下载目录>/歌手 - 歌名.jpg`
 - 控制台：搜索结果列表、实际音质、下载进度与最终文件路径
 - `--search-only --json`：标准 JSON 数组，字段为接口原始返回（`id/name/artist/album/pic_id/lyric_id/source`）
 
+## 首次使用：下载位置
+
+**第一次使用本 Skill 时，必须先询问用户想把音乐保存到哪里**，不要自行替用户决定。行为约定：
+
+- 首次（本地无配置且未传 `--output`）会**交互式询问**下载目录，直接回车则使用默认的 `music-downloader/downloads/`；答案会记入 `music-downloader/.music-downloader.json`，之后不再询问。
+- 若用户已明确给出目录，用 `--output <目录>` 一次性指定，同时会记住该目录。
+- 也可以先单独设置：`python download.py --set-dir "D:\Music"`。
+- Agent 代跑时若不希望交互：先问用户目录，再用 `--output` 传入；或用户想用默认目录时加 `--first` 并省略 `--output`（非交互环境会自动落到默认目录，不阻塞）。
+- 配置文件 `.music-downloader.json` 已被 `.gitignore` 忽略，属于本机个人设置，不要提交。
+
 ## 标准工作流
+
+**第 0 步 · 首次使用先问下载位置**（仅第一次）：询问用户音乐保存到哪里，拿到目录后：
+
+```bash
+python music-downloader/download.py --set-dir "<用户目录>"
+```
+
+之后所有下载都会自动使用该目录，无需重复询问。用户想用默认目录时，直接回车/跳过即可。
 
 **第 1 步 · 搜索**（当用户未指定具体某一条时，先列出结果让用户选择）：
 
@@ -82,6 +101,9 @@ python music-downloader/download.py "<关键字>" --first
 ## 常用命令示例
 
 ```bash
+# 首次设置下载位置（只需一次，之后自动记住）
+python download.py --set-dir "D:\Music"
+
 # 交互式搜索并选择下载
 python download.py "练习"
 
@@ -94,7 +116,7 @@ python download.py "Hello Adele" --source joox --no-lyric
 # 仅搜索并输出 JSON（供程序解析）
 python download.py "海屿你" --search-only --json
 
-# 下载到指定目录并保存封面
+# 下载到指定目录并保存封面（同时记住该目录）
 python download.py "稻香" --output D:\Music --cover
 ```
 
@@ -103,13 +125,14 @@ python download.py "稻香" --output D:\Music --cover
 | 功能 | 请求参数 | 关键返回 |
 | :--- | :--- | :--- |
 | 搜索 | `types=search&source=..&name=..&count=..&pages=..` | `[{id, name, artist[], album, pic_id, lyric_id, source}]` |
-| 获取音频 | `types=url&source=..&id=<track_id>&br=<128/192/320/740/999>` | `{url, br, size(KB)}` |
+| 获取音频 | `types=url&source=..&id=<track_id>&br=<128/192/320/740/999>` | `{url, br, size}` |
 | 获取歌词 | `types=lyric&source=..&id=<lyric_id>` | `{lyric, tlyric}` |
 | 获取封面 | `types=pic&source=..&id=<pic_id>&size=<300/500>` | `{url}` |
 
 - `br=999` 为 24bit 无损，`br=740` 为 16bit 无损，`br` 缺省为 `999`。
 - 下载直链使用曲目 `id`（track_id）；歌词用 `lyric_id`，封面用 `pic_id`（通常与 track_id 相同）。
 - 返回中的 `br` 是**实际**返回音质，可能与请求值不同，脚本会如实展示。
+- `size` 文档标注为 KB，但**实测其值等于文件字节数**（与 `Content-Length` 一致）；脚本按字节处理。
 
 ## 错误处理与限制
 

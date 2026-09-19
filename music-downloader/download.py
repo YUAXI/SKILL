@@ -46,6 +46,14 @@ if sys.platform == "win32":
 
 API_BASE = "https://music-api.gdstudio.xyz/api.php"
 DEFAULT_SOURCE = "netease"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, ".music-downloader.json")
+
+try:
+    _INPUT = input
+except NameError:  # pragma: no cover - 非交互环境
+    def _INPUT(prompt=""):
+        raise EOFError("no stdin")
 QUALITY_CHAIN = [999, 740, 320, 192, 128]
 QUALITY_LABEL = {999: "24bit无损", 740: "16bit无损", 320: "320K", 192: "192K", 128: "128K"}
 SUPPORTED_SOURCES = [
@@ -188,6 +196,66 @@ class MusicClient:
 
 
 # ---------- 工具函数 ----------
+# ---------- 配置（下载位置记忆） ----------
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(config):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, ensure_ascii=False, indent=2)
+        return True
+    except OSError as exc:
+        print("[配置] 保存失败：%s" % exc)
+        return False
+
+
+def is_interactive():
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def resolve_output_dir(args):
+    """决定下载目录：--output > 已保存的配置 > 询问用户。
+
+    首次使用（无 --output 且无配置）时会询问用户把音乐放在哪里，
+    并把答案记住，之后不再询问。
+    """
+    if args.output:
+        return os.path.abspath(os.path.expanduser(args.output))
+
+    config = load_config()
+    saved = config.get("download_dir")
+    if saved:
+        return os.path.abspath(os.path.expanduser(saved))
+
+    default_dir = os.path.join(SCRIPT_DIR, "downloads")
+    if args.search_only or not is_interactive():
+        return default_dir
+
+    print("\n首次使用，请设置音乐下载位置（直接回车使用默认目录）。")
+    try:
+        raw = _INPUT("下载目录 [%s]：" % default_dir).strip().strip('"')
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default_dir
+    chosen = os.path.abspath(os.path.expanduser(raw)) if raw else default_dir
+    config["download_dir"] = chosen
+    save_config(config)
+    print("已记住下载目录：%s（下次将不再询问）\n" % chosen)
+    return chosen
+
+
 def sanitize_filename(name):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(name))
     name = re.sub(r"\s+", " ", name).strip(" .")
@@ -351,7 +419,10 @@ def build_parser():
     parser.add_argument("--pages", type=int, default=1, help="搜索页码，默认 1")
     parser.add_argument("--br", type=int, default=999,
                         help="首选音质，默认 999；失败时自动降级 740->320->192->128")
-    parser.add_argument("--output", default=None, help="下载目录，默认脚本所在目录的 downloads/")
+    parser.add_argument("--output", default=None,
+                        help="下载目录，覆盖并记住该位置；首次使用未指定时会询问")
+    parser.add_argument("--set-dir", default=None,
+                        help="仅设置并保存默认下载目录，然后退出")
     parser.add_argument("--search-only", action="store_true", help="仅搜索并展示结果，不下载")
     parser.add_argument("--json", action="store_true", help="配合 --search-only，以 JSON 输出结果")
     parser.add_argument("--first", action="store_true", help="多条结果时自动选择第 1 条，不交互")
@@ -364,6 +435,16 @@ def build_parser():
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.set_dir:
+        chosen = os.path.abspath(os.path.expanduser(args.set_dir))
+        config = load_config()
+        config["download_dir"] = chosen
+        if save_config(config):
+            print("已设置默认下载目录：%s" % chosen)
+            return 0
+        return 1
+
     if not args.keyword:
         parser.print_help()
         return 2
@@ -423,7 +504,7 @@ def main(argv=None):
           % (actual_br, label, format_size(size_bytes) if size_bytes else "未知"))
 
     # 4. 下载音频
-    output_dir = args.output or os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
+    output_dir = resolve_output_dir(args)
     os.makedirs(output_dir, exist_ok=True)
     ext = guess_extension(url, actual_br)
     stem = sanitize_filename("%s - %s" % (artist, name))

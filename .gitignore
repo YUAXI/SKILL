@@ -2,3 +2,4 @@ API.md
 __pycache__/
 *.pyc
 downloads/
+.music-downloader.json
